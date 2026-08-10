@@ -308,12 +308,22 @@ def main():
         print(f"[op attn_qr (wq_b input)] maxdiff={d:.6e}  tokens={n}  "
               f"shape={tuple(qr_a.shape)} vs {tuple(qr_b.shape)}")
     # wq_b weights themselves: concat along dim 0 (the output-head dim).
+    # Robust version: report each rank's shape and never crash on asymmetric
+    # per-rank shapes (the 16384-vs-8192 crash).
     for name in ("attn_wq_b_weight", "attn_wq_b_scale"):
         ranks_a = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
         ranks_b = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+        print(f"[op {name}] DP{dp_a} rank shapes: "
+              f"{[None if x is None else tuple(x.shape) for x in ranks_a]}")
+        print(f"[op {name}] DP{dp_b} rank shapes: "
+              f"{[None if x is None else tuple(x.shape) for x in ranks_b]}")
         if all(x is not None for x in ranks_a + ranks_b):
-            A = torch.cat([x.float() for x in ranks_a], dim=0)
-            B = torch.cat([x.float() for x in ranks_b], dim=0)
+            try:
+                A = torch.cat([x.float() for x in ranks_a], dim=0)
+                B = torch.cat([x.float() for x in ranks_b], dim=0)
+            except RuntimeError as e:
+                print(f"[op {name}] CONCAT FAILED: {e}")
+                continue
             if A.shape == B.shape:
                 d = (A - B).abs().max().item()
                 print(f"[op {name}] maxdiff={d:.6e}  shape={tuple(A.shape)}")
