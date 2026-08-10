@@ -271,6 +271,38 @@ def main():
     elif ma is not None or mb is not None:
         print("(attn_meta.pt only on one side - re-sync dsa_v1.py)")
 
+    # --- o_proj sizes + wo_b output (resolves the per-rank vs full question) ---
+    om_a = load(os.path.join(dirs_a[0], "oproj_meta.pt"))
+    om_b = load(os.path.join(dirs_b[0], "oproj_meta.pt"))
+    if om_a is not None and om_b is not None:
+        for k in ("n_local_heads", "n_local_groups", "num_tokens_ctx", "o_proj_input", "output"):
+            print(f"[oproj_meta] {k}: DP{dp_a}={om_a.get(k)}  DP{dp_b}={om_b.get(k)}")
+    else:
+        print(f"[oproj_meta] missing: DP{dp_a}={om_a is not None} DP{dp_b}={om_b is not None} (re-sync dsa_v1.py)")
+    wb_a = [load(os.path.join(d, "attn_wo_b_out.pt")) for d in dirs_a]
+    wb_b = [load(os.path.join(d, "attn_wo_b_out.pt")) for d in dirs_b]
+    if all(x is not None for x in wb_a + wb_b):
+        print(f"[attn_wo_b_out] DP{dp_a} shapes: {[tuple(x.shape) for x in wb_a]}")
+        print(f"[attn_wo_b_out] DP{dp_b} shapes: {[tuple(x.shape) for x in wb_b]}")
+        try:
+            if wb_a[0].shape == wb_b[0].shape and all(x.shape == wb_a[0].shape for x in wb_a + wb_b):
+                # full tokens on every rank -> direct compare
+                n = min(wb_a[0].shape[0], wb_b[0].shape[0])
+                d = (wb_a[0][:n].float() - wb_b[0][:n].float()).abs().max().item()
+                print(f"[attn_wo_b_out] direct maxdiff={d:.6e}  shape={tuple(wb_a[0].shape)}")
+            else:
+                # per-rank chunks -> concat compare
+                A = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in wb_a], dim=0)
+                B = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in wb_b], dim=0)
+                n = min(A.shape[0], B.shape[0])
+                d = (A[:n] - B[:n]).abs().max().item()
+                print(f"[attn_wo_b_out] concat maxdiff={d:.6e}  tokens={A.shape[0]} vs {B.shape[0]}")
+        except Exception as e:
+            print(f"[attn_wo_b_out] compare failed: {e!r}")
+    else:
+        print(f"[attn_wo_b_out] missing: DP{dp_a}={[x is not None for x in wb_a]} "
+              f"DP{dp_b}={[x is not None for x in wb_b]} (re-sync dsa_v1.py)")
+
     # --- TP all_gather internals (register_custom_ops) ---
     meta_a = load(os.path.join(dirs_a[0], "tp_gather_meta.pt"))
     meta_b = load(os.path.join(dirs_b[0], "tp_gather_meta.pt"))
