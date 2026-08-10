@@ -323,6 +323,35 @@ def main():
                 B = torch.cat([x.float() for x in ranks_b], dim=0)
             except RuntimeError as e:
                 print(f"[op {name}] CONCAT FAILED: {e}")
+                # Fall back to head-aligned comparison: DP0 rank0 (bigger head
+                # count) must equal the concatenation of the corresponding DP1
+                # ranks (e.g. 32 heads vs 16+16). Assumes weights are
+                # (input, output); compare along the last dim.
+                try:
+                    # DP0 rank0 vs DP1 ranks 0..k such that output sizes match.
+                    if name.endswith("weight"):
+                        dim = 1  # (input, output)
+                    else:
+                        dim = 0  # (output,)
+                    sa = ranks_a[0].shape[dim] if ranks_a[0].dim() > dim else ranks_a[0].shape[0]
+                    acc, k, prev = [], 0, None
+                    for r in ranks_b:
+                        rb = r.shape[dim] if r.dim() > dim else r.shape[0]
+                        if prev is not None and k + rb > sa:
+                            break
+                        acc.append(r); k += rb
+                        if k == sa:
+                            break
+                    if sum(x.shape[dim] for x in acc) == sa:
+                        B0 = torch.cat([x.float() for x in acc], dim=dim)
+                        A0 = ranks_a[0].float()
+                        d = (A0 - B0).abs().max().item()
+                        print(f"[op {name}] head-aligned DP{dp_a} rank0 vs DP{dp_b} r0..{len(acc)-1}: "
+                              f"maxdiff={d:.6e}")
+                    else:
+                        print(f"[op {name}] head-aligned sizes don't match: {sa} vs {k}")
+                except Exception as e2:
+                    print(f"[op {name}] head-aligned compare failed: {e2!r}")
                 continue
             if A.shape == B.shape:
                 d = (A - B).abs().max().item()
