@@ -294,7 +294,8 @@ def main():
     om_a = load(os.path.join(dirs_a[0], "oproj_meta.pt"))
     om_b = load(os.path.join(dirs_b[0], "oproj_meta.pt"))
     if om_a is not None and om_b is not None:
-        for k in ("n_local_heads", "n_local_groups", "num_tokens_ctx", "o_proj_input", "output"):
+        for k in ("n_local_heads", "n_local_groups", "num_tokens_ctx", "o_proj_input", "output",
+                  "det_env", "det_active", "wo_a_weight", "wo_b_weight"):
             print(f"[oproj_meta] {k}: DP{dp_a}={om_a.get(k)}  DP{dp_b}={om_b.get(k)}")
     else:
         print(f"[oproj_meta] missing: DP{dp_a}={om_a is not None} DP{dp_b}={om_b is not None} (re-sync dsa_v1.py)")
