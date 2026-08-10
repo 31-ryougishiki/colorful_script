@@ -60,8 +60,18 @@ def head_aligned(rank_tensors: list[torch.Tensor]) -> torch.Tensor:
 def head_overlay(rank_tensors: list[torch.Tensor]) -> torch.Tensor:
     """Compare tensors where EVERY rank holds the FULL token set but a different
     head subset: overlay at the same token rows and accumulate only head columns.
-    Returns [N_tokens, sum(nh), H]."""
-    rank_tensors = [t.float() for t in rank_tensors]
+    Returns [N_tokens, sum(nh), H].
+
+    Accepts 1-D (flatten as [1,1,N]), 2-D [N,H] (1 head), 3-D [N,nh,H]."""
+    norm = []
+    for t in rank_tensors:
+        t = t.float()
+        if t.dim() == 1:
+            t = t.unsqueeze(0).unsqueeze(-1)
+        elif t.dim() == 2:
+            t = t.unsqueeze(1)
+        norm.append(t)
+    rank_tensors = norm
     total_h = sum(t.shape[1] for t in rank_tensors)
     n_tok = rank_tensors[0].shape[0]
     h_dim = rank_tensors[0].shape[2]
