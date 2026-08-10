@@ -307,6 +307,32 @@ def main():
         d = (qr_a[:n].float() - qr_b[:n].float()).abs().max().item()
         print(f"[op attn_qr (wq_b input)] maxdiff={d:.6e}  tokens={n}  "
               f"shape={tuple(qr_a.shape)} vs {tuple(qr_b.shape)}")
+
+    # RAW wq_b output (before q_rms + rotary) - isolates the matmul vs q_rms.
+    qo_a = [load(os.path.join(d, "attn_wq_b_out.pt")) for d in dirs_a]
+    qo_b = [load(os.path.join(d, "attn_wq_b_out.pt")) for d in dirs_b]
+    if all(x is not None for x in qo_a + qo_b):
+        try:
+            A = head_aligned(qo_a)
+            B = head_aligned(qo_b)
+            n = min(A.shape[0], B.shape[0])
+            d = (A[:n] - B[:n]).abs().max().item()
+            print(f"[op attn_wq_b_out (pre q_rms/rotary)] maxdiff={d:.6e}  heads={A.shape[1]}  tokens={n}")
+        except Exception as e:
+            print(f"[op attn_wq_b_out] compare failed: {e!r}")
+    else:
+        print(f"[op attn_wq_b_out] missing: DP{dp_a}={[x is not None for x in qo_a]} "
+              f"DP{dp_b}={[x is not None for x in qo_b]} (re-sync dsa_v1.py)")
+
+    # per-token scale of qr (from npu_rms_norm_dynamic_quant).
+    qs_a = load(os.path.join(dirs_a[0], "attn_qr_scale.pt"))
+    qs_b = load(os.path.join(dirs_b[0], "attn_qr_scale.pt"))
+    if qs_a is not None and qs_b is not None:
+        n = min(qs_a.numel(), qs_b.numel())
+        d = (qs_a.reshape(-1)[:n].float() - qs_b.reshape(-1)[:n].float()).abs().max().item()
+        print(f"[op attn_qr_scale] maxdiff={d:.6e}  shape={tuple(qs_a.shape)} vs {tuple(qs_b.shape)}")
+    else:
+        print(f"[op attn_qr_scale] missing: DP{dp_a}={qs_a is not None} DP{dp_b}={qs_b is not None}")
     # wq_b weights themselves: concat along dim 0 (the output-head dim).
     # Robust version: report each rank's shape and never crash on asymmetric
     # per-rank shapes (the 16384-vs-8192 crash).
