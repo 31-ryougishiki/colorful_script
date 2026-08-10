@@ -299,6 +299,27 @@ def main():
             print(f"[oproj_meta] {k}: DP{dp_a}={om_a.get(k)}  DP{dp_b}={om_b.get(k)}")
     else:
         print(f"[oproj_meta] missing: DP{dp_a}={om_a is not None} DP{dp_b}={om_b is not None} (re-sync dsa_v1.py)")
+
+    # --- det-path internals (VLLM_HETERO_OPROJ_DET): o_full/o_wa/o_wb are
+    # full-token/full-head on every rank, so rank0 of each DP is directly
+    # comparable. Localizes the o_proj divergence to head-gather (o_full) vs
+    # wo_a/wo_b compute vs weights/scales. ---
+    for name in ("det_o_full", "det_o_wa", "det_o_wb",
+                 "det_wo_a_weight", "det_wo_a_weight_scale",
+                 "det_wo_b_weight", "det_wo_b_weight_scale"):
+        fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
+        fb = load(os.path.join(dirs_b[0], f"{name}.pt"))
+        if fa is None or fb is None:
+            print(f"[det {name}] missing: DP{dp_a}={fa is not None} "
+                  f"DP{dp_b}={fb is not None} (re-sync dsa_v1.py)")
+            continue
+        A, B = fa.float(), fb.float()
+        n = min(A.shape[0], B.shape[0])
+        d = (A[:n] - B[:n]).abs().max().item()
+        mark = "   <== DET INTERNALS DIVERGE" if d > args.tol else ""
+        print(f"[det {name}] maxdiff={d:.6e}  shape={tuple(A.shape)} vs "
+              f"{tuple(B.shape)}{mark}")
+
     wb_a = [load(os.path.join(d, "attn_wo_b_out.pt")) for d in dirs_a]
     wb_b = [load(os.path.join(d, "attn_wo_b_out.pt")) for d in dirs_b]
     if all(x is not None for x in wb_a + wb_b):
