@@ -219,6 +219,25 @@ def main():
         print(f"[layer0 {name}] maxdiff={d:.6e}  nan_dp{dp_a}={nan_a} nan_dp{dp_b}={nan_b} "
               f"tokens={A.shape[0]} vs {B.shape[0]}{extra}{mark}")
 
+    # --- Hyper-Connector (hc_pre post/comb, hc_post output) ---
+    # layer_attn_out is 0.0 now (o_proj fixed) but layer_mlp_in diverges; the gap
+    # is hc_post(attn_out, residual, post, comb) + hc_pre(ffn) + layernorm.
+    # Compare the attention-side hc_pre outputs (post/comb) and hc_post output.
+    for name in ("attn_hc_pre_post", "attn_hc_pre_comb", "attn_hc_post_out"):
+        ha = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+        hb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+        if all(x is not None for x in ha + hb):
+            A = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in ha], dim=0)
+            B = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in hb], dim=0)
+            n = min(A.shape[0], B.shape[0])
+            d = (A[:n] - B[:n]).abs().max().item()
+            nbad = int(((A[:n] - B[:n]).abs().max(-1).values > 1e-3).sum().item())
+            print(f"[hc {name}] maxdiff={d:.6e}  bad_positions={nbad}/{n}  "
+                  f"shape={tuple(ha[0].shape)} vs {tuple(hb[0].shape)}")
+        else:
+            print(f"[hc {name}] missing: DP{dp_a}={[x is not None for x in ha]} "
+                  f"DP{dp_b}={[x is not None for x in hb]} (re-sync deepseek_v4.py)")
+
     # --- DSA attention op inputs/outputs (head-aligned) ---
     # If attn_op_q / attn_op_sink are bit-identical but attn_op_out differs,
     # the CANN op itself is at fault for asymmetric per-rank heads.
