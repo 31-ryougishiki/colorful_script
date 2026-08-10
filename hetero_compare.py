@@ -34,7 +34,12 @@ def _to_tokens(x: torch.Tensor) -> torch.Tensor:
 def head_aligned(rank_tensors: list[torch.Tensor]) -> torch.Tensor:
     """Place each rank's [N, nh, H] (or 1-D [nh]) tensor into a full
     [sum(N), sum(nh), H] tensor by concatenating token chunks and head chunks in
-    rank order, so differently-sharded DPs become directly comparable."""
+    rank order, so differently-sharded DPs become directly comparable.
+
+    NOTE: only correct when each rank holds a DIFFERENT token chunk (SP per-rank
+    slices). For tensors where EVERY rank holds the FULL token set (e.g. q / op
+    output computed on the all-gathered prefill), use head_overlay instead.
+    """
     if rank_tensors[0].dim() == 1:
         rank_tensors = [t.float().unsqueeze(0).unsqueeze(-1) for t in rank_tensors]
     else:
@@ -48,6 +53,24 @@ def head_aligned(rank_tensors: list[torch.Tensor]) -> torch.Tensor:
         n, nh, _ = t.shape
         out[off_t:off_t + n, off_h:off_h + nh, :] = t
         off_t += n
+        off_h += nh
+    return out
+
+
+def head_overlay(rank_tensors: list[torch.Tensor]) -> torch.Tensor:
+    """Compare tensors where EVERY rank holds the FULL token set but a different
+    head subset: overlay at the same token rows and accumulate only head columns.
+    Returns [N_tokens, sum(nh), H]."""
+    rank_tensors = [t.float() for t in rank_tensors]
+    total_h = sum(t.shape[1] for t in rank_tensors)
+    n_tok = rank_tensors[0].shape[0]
+    h_dim = rank_tensors[0].shape[2]
+    out = torch.zeros(n_tok, total_h, h_dim)
+    off_h = 0
+    for t in rank_tensors:
+        n, nh, _ = t.shape
+        assert n == n_tok, f"head_overlay requires same token count, got {n} vs {n_tok}"
+        out[:, off_h:off_h + nh, :] = t
         off_h += nh
     return out
 
@@ -208,8 +231,16 @@ def main():
             ranks_b.append(h)
         if not ranks_a or not ranks_b:
             continue
-        A = head_aligned(ranks_a)
-        B = head_aligned(ranks_b)
+        # attn_op_* tensors are computed on the FULL prefill tokens on every
+        # rank (only the head subset differs), so overlay by head, not stack
+        # by token. head_aligned would stack tokens and compare zeros vs real
+        # values, producing artificial divergence.
+        try:
+            A = head_overlay(ranks_a)
+            B = head_overlay(ranks_b)
+        except AssertionError as e:
+            print(f"[op {name}] head_overlay failed: {e}")
+            continue
         n = min(A.shape[0], B.shape[0])
         d = (A[:n] - B[:n]).abs().max().item()
         mark = "   <== OP OUTPUT DIFFERS (input matched)" if name == "attn_op_out" and d > args.tol else ""
@@ -313,8 +344,8 @@ def main():
     qo_b = [load(os.path.join(d, "attn_wq_b_out.pt")) for d in dirs_b]
     if all(x is not None for x in qo_a + qo_b):
         try:
-            A = head_aligned(qo_a)
-            B = head_aligned(qo_b)
+            A = head_overlay(qo_a)
+            B = head_overlay(qo_b)
             n = min(A.shape[0], B.shape[0])
             d = (A[:n] - B[:n]).abs().max().item()
             print(f"[op attn_wq_b_out (pre q_rms/rotary)] maxdiff={d:.6e}  heads={A.shape[1]}  tokens={n}")
