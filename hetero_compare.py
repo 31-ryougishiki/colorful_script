@@ -87,6 +87,23 @@ def main():
     print(f"DP{dp_a}: {[os.path.basename(os.path.dirname(d)) + '/' + os.path.basename(d) for d in dirs_a]}")
     print(f"DP{dp_b}: {[os.path.basename(os.path.dirname(d)) + '/' + os.path.basename(d) for d in dirs_b]}")
 
+    ra = [load(os.path.join(d, "oproj_rope_in.pt")) for d in dirs_a]
+    rb = [load(os.path.join(d, "oproj_rope_in.pt")) for d in dirs_b]
+    if not all(x is not None for x in ra + rb):
+        print("[oproj_rope_in] missing — dump not found in the selected fwd dir.")
+        print(f"  root={os.path.abspath(args.root)}  dp dirs: "
+              f"DP{dp_a}={rank_dirs(args.root, dp_a)}  DP{dp_b}={rank_dirs(args.root, dp_b)}")
+        for dp, dirs in ((dp_a, dirs_a), (dp_b, dirs_b)):
+            for d in dirs:
+                base = os.path.dirname(d)
+                fwds = sorted(glob.glob(os.path.join(base, "fwd*")))
+                if not fwds:
+                    print(f"  DP{dp} {os.path.basename(base)}: (no fwd dirs, flat files: "
+                          f"{[f for f in os.listdir(base) if f.endswith('.pt')][:10]})")
+                    continue
+                for fd in fwds:
+                    files = sorted(f for f in os.listdir(fd) if f.endswith(".pt"))
+                    print(f"  DP{dp} {os.path.basename(base)}/{os.path.basename(fd)}: {files}")
     for name, mark in (("oproj_rope_in", "ROPE INPUT DIVERGES"),
                        ("oproj_rope_out", "ROPE OUTPUT DIVERGES")):
         ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
@@ -103,9 +120,6 @@ def main():
                       f"bad_positions={nbad}/{n}{mark_out}")
             except Exception as e:
                 print(f"[{name}] compare failed: {e!r}")
-        else:
-            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
-                  f"DP{dp_b}={[x is not None for x in rb]} (re-sync dsa_v1.py)")
 
 
 if __name__ == "__main__":
