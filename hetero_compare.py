@@ -340,8 +340,12 @@ def main():
         fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
         fb = load(os.path.join(dirs_b[0], f"{name}.pt"))
         if fa is None or fb is None:
+            if name.endswith("weight_scale"):
+                note = "(expected: wo_a/wo_b are bf16, no weight_scale)"
+            else:
+                note = "(re-sync dsa_v1.py)"
             print(f"[det {name}] missing: DP{dp_a}={fa is not None} "
-                  f"DP{dp_b}={fb is not None} (re-sync dsa_v1.py)")
+                  f"DP{dp_b}={fb is not None} {note}")
             continue
         A, B = fa.float(), fb.float()
         n = min(A.shape[0], B.shape[0])
@@ -372,7 +376,8 @@ def main():
             print(f"[attn_wo_b_out] compare failed: {e!r}")
     else:
         print(f"[attn_wo_b_out] missing: DP{dp_a}={[x is not None for x in wb_a]} "
-              f"DP{dp_b}={[x is not None for x in wb_b]} (re-sync dsa_v1.py)")
+              f"DP{dp_b}={[x is not None for x in wb_b]} "
+              "(only saved in the NON-det path; unreachable with VLLM_HETERO_OPROJ_DET=1)")
 
     # --- TP all_gather internals (register_custom_ops) ---
     meta_a = load(os.path.join(dirs_a[0], "tp_gather_meta.pt"))
