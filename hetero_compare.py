@@ -304,7 +304,37 @@ def main():
     # full-token/full-head on every rank, so rank0 of each DP is directly
     # comparable. Localizes the o_proj divergence to head-gather (o_full) vs
     # wo_a/wo_b compute vs weights/scales. ---
-    for name in ("det_o_full", "det_o_wa", "det_o_wb",
+    # det_o_proj_input is the POST-ROPE attention output (per-rank heads,
+    # full tokens) BEFORE the head-gather.  Head-overlay it so a divergence
+    # here pinpoints the rope/assembly vs the head-gather (o_full).
+    opi_a = [load(os.path.join(d, "det_o_proj_input.pt")) for d in dirs_a]
+    opi_b = [load(os.path.join(d, "det_o_proj_input.pt")) for d in dirs_b]
+    if all(x is not None for x in opi_a + opi_b):
+        try:
+            A = head_overlay(opi_a)
+            B = head_overlay(opi_b)
+            n = min(A.shape[0], B.shape[0])
+            d = (A[:n] - B[:n]).abs().max().item()
+            nbad = int(((A[:n] - B[:n]).abs().max(-1).values > 1e-3).sum().item())
+            mark = "   <== O_PROJ_INPUT (POST-ROPE) DIVERGES" if d > args.tol else ""
+            print(f"[det o_proj_input (post-rope)] maxdiff={d:.6e}  heads={A.shape[1]}  "
+                  f"tokens={n}  bad_positions={nbad}/{n}{mark}")
+        except Exception as e:
+            print(f"[det o_proj_input] compare failed: {e!r}")
+    else:
+        print(f"[det o_proj_input] missing: DP{dp_a}={[x is not None for x in opi_a]} "
+              f"DP{dp_b}={[x is not None for x in opi_b]} (re-sync dsa_v1.py)")
+    for name in ("oproj_rope_cos", "oproj_rope_sin"):
+        fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
+        fb = load(os.path.join(dirs_b[0], f"{name}.pt"))
+        if fa is not None and fb is not None:
+            n = min(fa.numel(), fb.numel())
+            d = (fa.reshape(-1)[:n].float() - fb.reshape(-1)[:n].float()).abs().max().item()
+            print(f"[{name}] maxdiff={d:.6e}  shape={tuple(fa.shape)} vs {tuple(fb.shape)}"
+                  + ("   <== ROPE COS/SIN DIVERGE" if d > 0 else ""))
+        else:
+            print(f"[{name}] missing: DP{dp_a}={fa is not None} DP{dp_b}={fb is not None}")
+    for name in ("det_o_full", "det_o_full_gathered", "det_o_wa", "det_o_wb",
                  "det_wo_a_weight", "det_wo_a_weight_scale",
                  "det_wo_b_weight", "det_wo_b_weight_scale"):
         fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
