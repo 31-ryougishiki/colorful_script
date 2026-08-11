@@ -1,18 +1,5 @@
-"""Compare the o_proj rope input/output dumps between DP groups.
-
-The only remaining hetero dump (VLLM_HETERO_DEBUG + VLLM_HETERO_OPROJ_DET) is
-the o_proj rope at dsa_v1.py: it writes `oproj_rope_in.pt` (pre-rope,
-padding-zeroed) and `oproj_rope_out.pt` (post-rope) per rank.
-
-Each rank holds the FULL token set but a different head subset, so we head-
-overlay the per-rank tensors and compare DP0 vs DP1:
-
-- oproj_rope_in  ~0  AND oproj_rope_out  ~0  -> rope is deterministic, bug is
-  elsewhere.
-- oproj_rope_in  ~0  AND oproj_rope_out != 0  -> the rope OP itself diverges
-  (identical input + cos -> different output).
-- oproj_rope_in  != 0 -> the divergence is already in the rope input (attention
-  output / o_proj_input assembly).
+"""
+Compare the o_proj rope input/output dumps between DP groups.
 
 Usage:
     python hetero_compare.py [--root <dump_dir>] [--dps 0 1] [--tol 1e-2]
@@ -20,13 +7,13 @@ Usage:
 import argparse
 import glob
 import os
+import re
 
 import torch
 
 
 def head_overlay(rank_tensors):
-    """Overlay per-rank [N, nh, H] tensors (full tokens, different head subset)
-    into a [N, sum(nh), H] tensor in global-head order."""
+    """Overlay per-rank [N, nh, H] tensors into [N, sum(nh), H]."""
     norm = []
     for t in rank_tensors:
         t = t.float()
@@ -42,7 +29,7 @@ def head_overlay(rank_tensors):
     off_h = 0
     for t in norm:
         n, nh, _ = t.shape
-        assert n == n_tok, f"head_overlay requires same token count, got {n} vs {n_tok}"
+        assert n == n_tok, f"token count mismatch: {n} vs {n_tok}"
         out[:, off_h:off_h + nh, :] = t
         off_h += nh
     return out
@@ -58,26 +45,30 @@ def rank_dirs(root, dp):
     return sorted(glob.glob(os.path.join(root, f"dp{dp}_tp*")))
 
 
+def extract_fwd_num(name):
+    m = re.search(r'fwd(\d+)', name)
+    return int(m.group(1)) if m else -1
+
+
 def fwd_dir(rank_dir):
-    """Pick the fwd dir that actually contains the (one-time) rope dumps.
-    The dump lands in the first QUALIFYING forward (real prefill), which is not
-    necessarily the latest fwd (warmup batches may come after it)."""
     fwds = sorted(glob.glob(os.path.join(rank_dir, "fwd*")))
     if not fwds:
-        return rank_dir  # legacy flat layout
+        return rank_dir
+    candidates = []
     for d in fwds:
-        if os.path.exists(os.path.join(d, "oproj_rope_in.pt")) \
-                and os.path.exists(os.path.join(d, "oproj_rope_out.pt")):
-            return d
-    return fwds[-1]  # fall back to the latest
+        if os.path.exists(os.path.join(d, "oproj_rope_in.pt")) and \
+           os.path.exists(os.path.join(d, "oproj_rope_out.pt")):
+            candidates.append(d)
+    if candidates:
+        candidates_sorted = sorted(candidates, key=lambda x: extract_fwd_num(os.path.basename(x)), reverse=True)
+        return candidates_sorted[0]
+    return fwds[-1]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dps", nargs="+", type=int, default=[0, 1])
-    # Auto-use VLLM_HETERO_DEBUG_DIR (where the server writes dumps) when no
-    # explicit --root is given — the dumps never land in the CWD's hetero_debug.
-    ap.add_argument("--root", default=os.environ.get("VLLM_HETERO_DEBUG_DIR", "hetero_debug"))
+    ap.add_argument("--root", default="hetero_debug")
     ap.add_argument("--tol", type=float, default=1e-2)
     args = ap.parse_args()
     dp_a, dp_b = args.dps
@@ -86,42 +77,73 @@ def main():
     if not dirs_a or not dirs_b:
         print(f"no dumps for dp{args.dps}: {dirs_a} {dirs_b}")
         return
-    print(f"DP{dp_a}: {[os.path.basename(os.path.dirname(d)) + '/' + os.path.basename(d) for d in dirs_a]}")
-    print(f"DP{dp_b}: {[os.path.basename(os.path.dirname(d)) + '/' + os.path.basename(d) for d in dirs_b]}")
 
-    ra = [load(os.path.join(d, "oproj_rope_in.pt")) for d in dirs_a]
-    rb = [load(os.path.join(d, "oproj_rope_in.pt")) for d in dirs_b]
-    if not all(x is not None for x in ra + rb):
-        print("[oproj_rope_in] missing — dump not found in the selected fwd dir.")
-        print(f"  root={os.path.abspath(args.root)}  dp dirs: "
-              f"DP{dp_a}={rank_dirs(args.root, dp_a)}  DP{dp_b}={rank_dirs(args.root, dp_b)}")
-        for dp, dirs in ((dp_a, dirs_a), (dp_b, dirs_b)):
-            for d in dirs:
-                base = os.path.dirname(d)
-                fwds = sorted(glob.glob(os.path.join(base, "fwd*")))
-                if not fwds:
-                    print(f"  DP{dp} {os.path.basename(base)}: (no fwd dirs, flat files: "
-                          f"{[f for f in os.listdir(base) if f.endswith('.pt')][:10]})")
-                    continue
-                for fd in fwds:
-                    files = sorted(f for f in os.listdir(fd) if f.endswith(".pt"))
-                    print(f"  DP{dp} {os.path.basename(base)}/{os.path.basename(fd)}: {files}")
-    for name, mark in (("oproj_rope_in", "ROPE INPUT DIVERGES"),
-                       ("oproj_rope_out", "ROPE OUTPUT DIVERGES")):
+    def fmt(d):
+        return os.path.basename(os.path.dirname(d)) + '/' + os.path.basename(d)
+    print(f"DP{dp_a}: {[fmt(d) for d in dirs_a]}")
+    print(f"DP{dp_b}: {[fmt(d) for d in dirs_b]}")
+
+    # Concat per-rank token chunks (SP slices are contiguous in token order,
+    # so concat restores the full token order for both DPs).
+    def concat_compare(name, mark):
         ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
         rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
-        if all(x is not None for x in ra + rb):
-            try:
-                A = head_overlay(ra)
-                B = head_overlay(rb)
-                n = min(A.shape[0], B.shape[0])
-                d = (A[:n] - B[:n]).abs().max().item()
-                nbad = int(((A[:n] - B[:n]).abs().max(-1).values > 1e-3).sum().item())
-                mark_out = f"   <== {mark}" if d > args.tol else ""
-                print(f"[{name}] maxdiff={d:.6e}  heads={A.shape[1]}  tokens={n}  "
-                      f"bad_positions={nbad}/{n}{mark_out}")
-            except Exception as e:
-                print(f"[{name}] compare failed: {e!r}")
+        if not all(x is not None for x in ra + rb):
+            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
+                  f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
+            return
+        A = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in ra], dim=0)
+        B = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in rb], dim=0)
+        n = min(A.shape[0], B.shape[0])
+        diff = (A[:n] - B[:n]).abs().float()
+        maxdiff = diff.max().item()
+        nbad = int((diff.max(-1).values > 1e-3).sum().item())
+        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
+        print(f"[{name}] maxdiff={maxdiff:.6e}  tokens={n}  bad_positions={nbad}/{n}{mark_out}")
+
+    # o_proj_input is per-rank heads with FULL tokens -> head-overlay.
+    def overlay_compare(name, mark):
+        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+        if not all(x is not None for x in ra + rb):
+            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
+                  f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
+            return
+        try:
+            A = head_overlay(ra)
+            B = head_overlay(rb)
+        except AssertionError as e:
+            print(f"[{name}] head_overlay failed: {e}")
+            return
+        n = min(A.shape[0], B.shape[0])
+        diff = (A[:n] - B[:n]).abs().float()
+        maxdiff = diff.max().item()
+        nbad = int((diff.max(-1).values > 1e-3).sum().item())
+        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
+        print(f"[{name}] maxdiff={maxdiff:.6e}  heads={A.shape[1]}  tokens={n}  "
+              f"bad_positions={nbad}/{n}{mark_out}")
+
+    # o_full/o_wa/o_wb are FULL-token/full-head on every rank -> rank0 direct.
+    def direct_compare(name, mark):
+        fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
+        fb = load(os.path.join(dirs_b[0], f"{name}.pt"))
+        if fa is None or fb is None:
+            print(f"[{name}] missing: DP{dp_a}={fa is not None} DP{dp_b}={fb is not None} (re-sync)")
+            return
+        n = min(fa.shape[0], fb.shape[0])
+        diff = (fa[:n].float() - fb[:n].float()).abs()
+        maxdiff = diff.max().item()
+        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
+        print(f"[{name}] maxdiff={maxdiff:.6e}  shape={tuple(fa.shape)} vs {tuple(fb.shape)}{mark_out}")
+
+    overlay_compare("oproj_input", "O_PROJ INPUT (POST-ROPE) DIVERGES")
+    direct_compare("oproj_o_full", "HEAD-GATHER DIVERGES")
+    direct_compare("oproj_o_wa", "WO_A DIVERGES")
+    direct_compare("oproj_o_wb", "WO_B DIVERGES")
+    concat_compare("oproj_out", "O_PROJ OUTPUT DIVERGES")
+    concat_compare("layer_attn_out", "ATTN+HC_POST DIVERGES")
+    concat_compare("layer_mlp_in", "MLP_IN (MoE ROUTER INPUT) DIVERGES")
+    concat_compare("layer_mlp_out", "MLP/MoE OUTPUT DIVERGES")
 
 
 if __name__ == "__main__":
