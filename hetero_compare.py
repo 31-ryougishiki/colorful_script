@@ -51,18 +51,19 @@ def extract_fwd_num(name):
 
 
 def fwd_dir(rank_dir):
+    """Choose the fwd* subdirectory that actually contains dump files."""
     fwds = sorted(glob.glob(os.path.join(rank_dir, "fwd*")))
     if not fwds:
         return rank_dir
-    candidates = []
-    for d in fwds:
-        if os.path.exists(os.path.join(d, "oproj_rope_in.pt")) and \
-           os.path.exists(os.path.join(d, "oproj_rope_out.pt")):
-            candidates.append(d)
-    if candidates:
-        candidates_sorted = sorted(candidates, key=lambda x: extract_fwd_num(os.path.basename(x)), reverse=True)
-        return candidates_sorted[0]
-    return fwds[-1]
+
+    # Prefer directories that contain oproj_input.pt (present in all your dumps)
+    for d in reversed(fwds):  # try higher numbers first, but ensure file exists
+        if os.path.exists(os.path.join(d, "oproj_input.pt")):
+            return d
+
+    # Fallback: choose the directory with the most .pt files
+    best = max(fwds, key=lambda d: len(glob.glob(os.path.join(d, "*.pt"))))
+    return best
 
 
 def main():
@@ -101,49 +102,13 @@ def main():
         mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
         print(f"[{name}] maxdiff={maxdiff:.6e}  tokens={n}  bad_positions={nbad}/{n}{mark_out}")
 
-    # o_proj_input is per-rank heads with FULL tokens -> head-overlay.
-    def overlay_compare(name, mark):
-        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
-        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
-        if not all(x is not None for x in ra + rb):
-            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
-                  f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
-            return
-        try:
-            A = head_overlay(ra)
-            B = head_overlay(rb)
-        except AssertionError as e:
-            print(f"[{name}] head_overlay failed: {e}")
-            return
-        n = min(A.shape[0], B.shape[0])
-        diff = (A[:n] - B[:n]).abs().float()
-        maxdiff = diff.max().item()
-        nbad = int((diff.max(-1).values > 1e-3).sum().item())
-        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
-        print(f"[{name}] maxdiff={maxdiff:.6e}  heads={A.shape[1]}  tokens={n}  "
-              f"bad_positions={nbad}/{n}{mark_out}")
-
-    # o_full/o_wa/o_wb are FULL-token/full-head on every rank -> rank0 direct.
-    def direct_compare(name, mark):
-        fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
-        fb = load(os.path.join(dirs_b[0], f"{name}.pt"))
-        if fa is None or fb is None:
-            print(f"[{name}] missing: DP{dp_a}={fa is not None} DP{dp_b}={fb is not None} (re-sync)")
-            return
-        n = min(fa.shape[0], fb.shape[0])
-        diff = (fa[:n].float() - fb[:n].float()).abs()
-        maxdiff = diff.max().item()
-        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
-        print(f"[{name}] maxdiff={maxdiff:.6e}  shape={tuple(fa.shape)} vs {tuple(fb.shape)}{mark_out}")
-
-    overlay_compare("oproj_input", "O_PROJ INPUT (POST-ROPE) DIVERGES")
-    direct_compare("oproj_o_full", "HEAD-GATHER DIVERGES")
-    direct_compare("oproj_o_wa", "WO_A DIVERGES")
-    direct_compare("oproj_o_wb", "WO_B DIVERGES")
     concat_compare("oproj_out", "O_PROJ OUTPUT DIVERGES")
+    concat_compare("hc_residual", "HC_RESIDUAL (LAYER INPUT) DIVERGES")
+    concat_compare("hc_pre_y", "HC_PRE OUTPUT Y DIVERGES")
+    concat_compare("hc_pre_post", "HC_PRE POST DIVERGES")
+    concat_compare("hc_pre_comb", "HC_PRE COMB DIVERGES")
+    concat_compare("attn_in", "ATTN_IN (LAYERNORM OUTPUT) DIVERGES")
     concat_compare("layer_attn_out", "ATTN+HC_POST DIVERGES")
-    concat_compare("layer_mlp_in", "MLP_IN (MoE ROUTER INPUT) DIVERGES")
-    concat_compare("layer_mlp_out", "MLP/MoE OUTPUT DIVERGES")
 
 
 if __name__ == "__main__":
