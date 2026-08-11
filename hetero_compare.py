@@ -113,14 +113,12 @@ def main():
             return
         pa = [x.get("ptr") for x in ra]
         pb = [x.get("ptr") for x in rb]
+        fa = [x.get("fwd") for x in ra]
+        fb = [x.get("fwd") for x in rb]
         same_across_a = len(set(pa)) == 1
         same_across_b = len(set(pb)) == 1
-        # Cross-rank ptr equality is only meaningful across processes as a
-        # regularity signal (DP1 all-equal vs DP0 all-different).
-        print(f"[{name}] DP{dp_a} ptrs={pa} (all_same={same_across_a})")
-        print(f"[{name}] DP{dp_b} ptrs={pb} (all_same={same_across_b})")
-        # Within-rank: the paired DP0[0]/DP1[0] ptrs are from separate processes,
-        # so equality here is not the signal; report shapes.
+        print(f"[{name}] DP{dp_a} ptrs={pa} fwd={fa} (all_same={same_across_a})")
+        print(f"[{name}] DP{dp_b} ptrs={pb} fwd={fb} (all_same={same_across_b})")
         print(f"[{name}] shapes DP{dp_a}={[x.get('shape') for x in ra]} "
               f"DP{dp_b}={[x.get('shape') for x in rb]}{mark}")
 
