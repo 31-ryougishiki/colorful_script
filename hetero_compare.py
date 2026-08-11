@@ -139,6 +139,7 @@ def main():
     concat_compare("oproj_out", "O_PROJ OUTPUT DIVERGES")
     concat_compare("model_embed", "RAW EMBEDDING DIVERGES")
     concat_compare("model_embed_hc", "EMBEDDING (REPEATED, LAYER INPUT) DIVERGES")
+    concat_compare("model_pre_layer0", "MODEL PRE-LAYER0 INPUT DIVERGES")
     concat_compare("layer0_input", "LAYER0 ENTRY INPUT (PRE-CLONE) DIVERGES")
     concat_compare("hc_residual", "HC_RESIDUAL (LAYER INPUT CLONE) DIVERGES")
 
