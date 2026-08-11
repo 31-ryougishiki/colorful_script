@@ -139,16 +139,8 @@ def main():
     concat_compare("oproj_out", "O_PROJ OUTPUT DIVERGES")
     concat_compare("model_embed", "RAW EMBEDDING DIVERGES")
     concat_compare("model_embed_hc", "EMBEDDING (REPEATED, LAYER INPUT) DIVERGES")
-    concat_compare("hc_residual", "HC_RESIDUAL (LAYER INPUT) DIVERGES")
-    concat_compare("hc_pre_y", "HC_PRE OUTPUT Y DIVERGES")
-    concat_compare("hc_pre_post", "HC_PRE POST DIVERGES")
-    concat_compare("hc_pre_comb", "HC_PRE COMB DIVERGES")
-    concat_compare("attn_in", "ATTN_IN (LAYERNORM OUTPUT) DIVERGES")
-    direct_compare("attn_hidden_in", "ATTN ALL-GATHERED INPUT DIVERGES")
-    overlay_compare("attn_op_q", "Q PROJECTION DIVERGES")
-    overlay_compare("attn_op_out", "CANN ATTENTION OP OUTPUT DIVERGES")
-    overlay_compare("oproj_input", "O_PROJ INPUT (POST-ROPE) DIVERGES")
-    concat_compare("layer_attn_out", "ATTN+HC_POST DIVERGES")
+    concat_compare("layer0_input", "LAYER0 ENTRY INPUT (PRE-CLONE) DIVERGES")
+    concat_compare("hc_residual", "HC_RESIDUAL (LAYER INPUT CLONE) DIVERGES")
 
 
 if __name__ == "__main__":
