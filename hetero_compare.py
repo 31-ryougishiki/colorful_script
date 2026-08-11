@@ -102,12 +102,53 @@ def main():
         mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
         print(f"[{name}] maxdiff={maxdiff:.6e}  tokens={n}  bad_positions={nbad}/{n}{mark_out}")
 
+    # attn_hidden_in is full tokens, no heads -> direct rank0 compare.
+    def direct_compare(name, mark):
+        fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
+        fb = load(os.path.join(dirs_b[0], f"{name}.pt"))
+        if fa is None or fb is None:
+            print(f"[{name}] missing: DP{dp_a}={fa is not None} DP{dp_b}={fb is not None} (re-sync)")
+            return
+        n = min(fa.shape[0], fb.shape[0])
+        diff = (fa[:n].float() - fb[:n].float()).abs()
+        maxdiff = diff.max().item()
+        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
+        print(f"[{name}] maxdiff={maxdiff:.6e}  shape={tuple(fa.shape)} vs {tuple(fb.shape)}{mark_out}")
+
+    # Per-rank heads with full tokens -> head-overlay.
+    def overlay_compare(name, mark):
+        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+        if not all(x is not None for x in ra + rb):
+            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
+                  f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
+            return
+        try:
+            A = head_overlay(ra)
+            B = head_overlay(rb)
+        except AssertionError as e:
+            print(f"[{name}] head_overlay failed: {e}")
+            return
+        n = min(A.shape[0], B.shape[0])
+        diff = (A[:n] - B[:n]).abs().float()
+        maxdiff = diff.max().item()
+        nbad = int((diff.max(-1).values > 1e-3).sum().item())
+        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
+        print(f"[{name}] maxdiff={maxdiff:.6e}  heads={A.shape[1]}  tokens={n}  "
+              f"bad_positions={nbad}/{n}{mark_out}")
+
     concat_compare("oproj_out", "O_PROJ OUTPUT DIVERGES")
+    concat_compare("model_embed", "RAW EMBEDDING DIVERGES")
+    concat_compare("model_embed_hc", "EMBEDDING (REPEATED, LAYER INPUT) DIVERGES")
     concat_compare("hc_residual", "HC_RESIDUAL (LAYER INPUT) DIVERGES")
     concat_compare("hc_pre_y", "HC_PRE OUTPUT Y DIVERGES")
     concat_compare("hc_pre_post", "HC_PRE POST DIVERGES")
     concat_compare("hc_pre_comb", "HC_PRE COMB DIVERGES")
     concat_compare("attn_in", "ATTN_IN (LAYERNORM OUTPUT) DIVERGES")
+    direct_compare("attn_hidden_in", "ATTN ALL-GATHERED INPUT DIVERGES")
+    overlay_compare("attn_op_q", "Q PROJECTION DIVERGES")
+    overlay_compare("attn_op_out", "CANN ATTENTION OP OUTPUT DIVERGES")
+    overlay_compare("oproj_input", "O_PROJ INPUT (POST-ROPE) DIVERGES")
     concat_compare("layer_attn_out", "ATTN+HC_POST DIVERGES")
 
 
