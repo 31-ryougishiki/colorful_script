@@ -51,17 +51,16 @@ def extract_fwd_num(name):
 
 
 def fwd_dir(rank_dir):
-    """Choose the fwd* subdirectory that actually contains dump files."""
+    """Choose the dump directory: prefer the fixed per-rank dir (new layout,
+    all probes co-located), else fall back to fwd* subdirs (legacy layout)."""
+    if os.path.exists(os.path.join(rank_dir, "oproj_out.pt")):
+        return rank_dir
     fwds = sorted(glob.glob(os.path.join(rank_dir, "fwd*")))
     if not fwds:
         return rank_dir
-
-    # Prefer directories that contain oproj_input.pt (present in all your dumps)
-    for d in reversed(fwds):  # try higher numbers first, but ensure file exists
+    for d in reversed(fwds):
         if os.path.exists(os.path.join(d, "oproj_input.pt")):
             return d
-
-    # Fallback: choose the directory with the most .pt files
     best = max(fwds, key=lambda d: len(glob.glob(os.path.join(d, "*.pt"))))
     return best
 
