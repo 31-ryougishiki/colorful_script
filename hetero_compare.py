@@ -75,7 +75,9 @@ def fwd_dir(rank_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dps", nargs="+", type=int, default=[0, 1])
-    ap.add_argument("--root", default="hetero_debug")
+    # Auto-use VLLM_HETERO_DEBUG_DIR (where the server writes dumps) when no
+    # explicit --root is given — the dumps never land in the CWD's hetero_debug.
+    ap.add_argument("--root", default=os.environ.get("VLLM_HETERO_DEBUG_DIR", "hetero_debug"))
     ap.add_argument("--tol", type=float, default=1e-2)
     args = ap.parse_args()
     dp_a, dp_b = args.dps
