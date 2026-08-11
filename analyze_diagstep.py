@@ -86,8 +86,22 @@ def parse_triton(line: str) -> dict | None:
 
 
 def classify(d: dict, min_ms: float) -> str:
-    """Return a one-line mechanism verdict for a spike step."""
+    """Return a one-line mechanism verdict for a spike/compile step."""
     spike = max(d["fwd_d"], d["fwd_h"], d["cos_d"], d["drain"])
+    # triton JIT compile candidate: host spent >500ms inside q_rms_rope.
+    # Checked before the spike gate so a compile on an otherwise-normal step
+    # still gets a verdict.
+    if d["qrms_h"] >= 500.0:
+        tag = (f"TRITON JIT RECOMPILE in q_rms_rope (host={d['qrms_h']:.0f}ms "
+               f"dev={d['qrms_d']:.0f}ms drain={d['drain']:.0f}ms)")
+        if d["drain"] < 500.0:
+            tag += (" | device idle during compile -> pure CPU, a sync before "
+                    "model_forward will NOT remove it; fix = rms_norm.py "
+                    "TOTAL_BATCH->runtime or stable pad buckets")
+        else:
+            tag += (" | device backlog draining inside launch -> a sync before "
+                    "model_forward absorbs part of it")
+        return tag
     if spike < min_ms:
         return ""
     # cos region device-bound -> gather/op in update_cos_sin
@@ -97,10 +111,6 @@ def classify(d: dict, min_ms: float) -> str:
                 f"fwd_h={d['fwd_h']:.0f}ms while device busy")
     # model_forward region
     if d["fwd_d"] >= min_ms or d["qrms_d"] >= min_ms:
-        if d["qrms_d"] >= min_ms:
-            tag = (f"q_rms_rope dev={d['qrms_d']:.0f}ms "
-                   f"host={d['qrms_h']:.0f}ms")
-            return tag
         if d["moe_d"] >= min_ms:
             return (f"DEVICE-BOUND in MoE branch (moe_d={d['moe_d']:.0f}ms "
                     f"host={d['moe_h']:.0f}ms)")
@@ -153,7 +163,9 @@ def main() -> int:
         ordered = sorted(ws)
         fwd_dev = [ws[s]["fwd_d"] for s in ordered]
         med = statistics.median(fwd_dev)
-        threshold = max(args.min_ms, med * 5.0)
+        # fwd_d is in thousands of ms; 5x would swallow 2-3s spikes.  Use a
+        # tighter multiple + an absolute floor so triton-recompile steps show.
+        threshold = max(args.min_ms, med * 1.3)
 
         print(f"\n=== worker {w} (median fwd_d={med:.1f}ms, "
               f"spike threshold={threshold:.1f}ms) ===")
@@ -165,15 +177,20 @@ def main() -> int:
         for s in ordered:
             d = ws[s]
             spike = max(d["fwd_d"], d["fwd_h"], d["cos_d"], d["drain"]) > threshold
-            if not spike and not args.all:
+            compile_cand = d["qrms_h"] >= 500.0
+            if not spike and not compile_cand and not args.all:
                 continue
-            flag = " <== SPIKE" if spike else ""
+            flag = ""
+            if spike:
+                flag += " <== SPIKE"
+            if compile_cand:
+                flag += " [COMPILE?]"
             print(f"{s:>4}{d['tok']:>7}{d['pad']:>8}"
                   f"{d['cos_h']:>7.1f}{d['cos_d']:>8.1f}{d['fwd_h']:>8.1f}"
                   f"{d['fwd_d']:>8.1f}{d['drain']:>8.1f}"
                   f"{d['qrms_h']:>8.1f}{d['qrms_d']:>8.1f}{d['moe_d']:>7.1f}"
                   f"{d['dMemR']:>+7.0f}{flag}")
-            if spike:
+            if spike or compile_cand:
                 print(f"    -> {classify(d, threshold)}")
 
     # triton new-shape events with slow launch
