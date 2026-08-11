@@ -101,6 +101,29 @@ def main():
         mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
         print(f"[{name}] maxdiff={maxdiff:.6e}  tokens={n}  bad_positions={nbad}/{n}{mark_out}")
 
+    # Per-rank {ptr, shape} dict compare (not tensors).  Lets us see whether
+    # the layer input is the SAME buffer as model_pre_layer0 (same ptr) or a
+    # different aliased buffer (different ptr), within each rank.
+    def meta_compare(name, mark):
+        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+        if not all(x is not None for x in ra + rb):
+            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
+                  f"DP{dp_b}={[x is not None for x in rb]}")
+            return
+        pa = [x.get("ptr") for x in ra]
+        pb = [x.get("ptr") for x in rb]
+        same_across_a = len(set(pa)) == 1
+        same_across_b = len(set(pb)) == 1
+        # Cross-rank ptr equality is only meaningful across processes as a
+        # regularity signal (DP1 all-equal vs DP0 all-different).
+        print(f"[{name}] DP{dp_a} ptrs={pa} (all_same={same_across_a})")
+        print(f"[{name}] DP{dp_b} ptrs={pb} (all_same={same_across_b})")
+        # Within-rank: the paired DP0[0]/DP1[0] ptrs are from separate processes,
+        # so equality here is not the signal; report shapes.
+        print(f"[{name}] shapes DP{dp_a}={[x.get('shape') for x in ra]} "
+              f"DP{dp_b}={[x.get('shape') for x in rb]}{mark}")
+
     # attn_hidden_in is full tokens, no heads -> direct rank0 compare.
     def direct_compare(name, mark):
         fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
@@ -140,8 +163,9 @@ def main():
     concat_compare("model_embed", "RAW EMBEDDING DIVERGES")
     concat_compare("model_embed_hc", "EMBEDDING (REPEATED, LAYER INPUT) DIVERGES")
     concat_compare("model_pre_layer0", "MODEL PRE-LAYER0 INPUT DIVERGES")
-    concat_compare("model_pre_layer0_meta", "MODEL PRE-LAYER0 META (PTR)")
+    meta_compare("model_pre_layer0_meta", "MODEL PRE-LAYER0 PTR")
     concat_compare("layer0_input", "LAYER0 ENTRY INPUT (PRE-CLONE) DIVERGES")
+    meta_compare("layer0_input_meta", "LAYER0 INPUT PTR")
     concat_compare("hc_residual", "HC_RESIDUAL (LAYER INPUT CLONE) DIVERGES")
 
 
