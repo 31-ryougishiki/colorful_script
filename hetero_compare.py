@@ -59,10 +59,17 @@ def rank_dirs(root, dp):
 
 
 def fwd_dir(rank_dir):
+    """Pick the fwd dir that actually contains the (one-time) rope dumps.
+    The dump lands in the first QUALIFYING forward (real prefill), which is not
+    necessarily the latest fwd (warmup batches may come after it)."""
     fwds = sorted(glob.glob(os.path.join(rank_dir, "fwd*")))
     if not fwds:
         return rank_dir  # legacy flat layout
-    return fwds[-1]
+    for d in fwds:
+        if os.path.exists(os.path.join(d, "oproj_rope_in.pt")) \
+                and os.path.exists(os.path.join(d, "oproj_rope_out.pt")):
+            return d
+    return fwds[-1]  # fall back to the latest
 
 
 def main():
