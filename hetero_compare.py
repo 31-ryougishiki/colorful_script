@@ -334,6 +334,26 @@ def main():
                   + ("   <== ROPE COS/SIN DIVERGE" if d > 0 else ""))
         else:
             print(f"[{name}] missing: DP{dp_a}={fa is not None} DP{dp_b}={fb is not None}")
+    # Rope INPUT vs OUTPUT (per-rank heads, full tokens -> head-overlay).  If
+    # in matches 0.0 but out diverges, the rope op itself is the divergence.
+    for name, mark in (("oproj_rope_in", "ROPE INPUT DIVERGES"),
+                       ("oproj_rope_out", "ROPE OUTPUT DIVERGES")):
+        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+        if all(x is not None for x in ra + rb):
+            try:
+                A = head_overlay(ra)
+                B = head_overlay(rb)
+                n = min(A.shape[0], B.shape[0])
+                d = (A[:n] - B[:n]).abs().max().item()
+                nbad = int(((A[:n] - B[:n]).abs().max(-1).values > 1e-3).sum().item())
+                print(f"[{name}] maxdiff={d:.6e}  heads={A.shape[1]}  tokens={n}  "
+                      f"bad_positions={nbad}/{n}" + ("   <== " + mark if d > args.tol else ""))
+            except Exception as e:
+                print(f"[{name}] compare failed: {e!r}")
+        else:
+            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
+                  f"DP{dp_b}={[x is not None for x in rb]}")
     for name in ("det_o_full", "det_o_full_gathered", "det_o_wa", "det_o_wb",
                  "det_wo_a_weight", "det_wo_a_weight_scale",
                  "det_wo_b_weight", "det_wo_b_weight_scale"):
