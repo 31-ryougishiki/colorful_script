@@ -1,8 +1,7 @@
+#!/usr/bin/env python3
 """
-Compare the o_proj rope input/output dumps between DP groups.
-
-Usage:
-    python hetero_compare.py [--root <dump_dir>] [--dps 0 1] [--tol 1e-2]
+Compare dump tensors between two DP groups (e.g., DP0 vs DP1).
+All tensors are concatenated along the token dimension (first axis).
 """
 import argparse
 import glob
@@ -10,29 +9,6 @@ import os
 import re
 
 import torch
-
-
-def head_overlay(rank_tensors):
-    """Overlay per-rank [N, nh, H] tensors into [N, sum(nh), H]."""
-    norm = []
-    for t in rank_tensors:
-        t = t.float()
-        if t.dim() == 1:
-            t = t.unsqueeze(0).unsqueeze(-1)
-        elif t.dim() == 2:
-            t = t.unsqueeze(1)
-        norm.append(t)
-    total_h = sum(t.shape[1] for t in norm)
-    n_tok = norm[0].shape[0]
-    h_dim = norm[0].shape[2]
-    out = torch.zeros(n_tok, total_h, h_dim)
-    off_h = 0
-    for t in norm:
-        n, nh, _ = t.shape
-        assert n == n_tok, f"token count mismatch: {n} vs {n_tok}"
-        out[:, off_h:off_h + nh, :] = t
-        off_h += nh
-    return out
 
 
 def load(path):
@@ -45,14 +21,7 @@ def rank_dirs(root, dp):
     return sorted(glob.glob(os.path.join(root, f"dp{dp}_tp*")))
 
 
-def extract_fwd_num(name):
-    m = re.search(r'fwd(\d+)', name)
-    return int(m.group(1)) if m else -1
-
-
 def fwd_dir(rank_dir):
-    """Choose the dump directory: prefer the fixed per-rank dir (new layout,
-    all probes co-located), else fall back to fwd* subdirs (legacy layout)."""
     if os.path.exists(os.path.join(rank_dir, "oproj_out.pt")):
         return rank_dir
     fwds = sorted(glob.glob(os.path.join(rank_dir, "fwd*")))
@@ -63,6 +32,42 @@ def fwd_dir(rank_dir):
             return d
     best = max(fwds, key=lambda d: len(glob.glob(os.path.join(d, "*.pt"))))
     return best
+
+
+def compare_probe(name, dirs_a, dirs_b, dp_a, dp_b, tol):
+    """Compare a probe by concatenating all ranks along the token dimension."""
+    ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+    rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+    if not all(x is not None for x in ra + rb):
+        print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
+              f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
+        return
+
+    # Print shapes for diagnosis
+    print(f"[{name}] DP{dp_a} shapes: {[x.shape for x in ra]}")
+    print(f"[{name}] DP{dp_b} shapes: {[x.shape for x in rb]}")
+
+    # Concatenate along token dimension (dim=0)
+    try:
+        A = torch.cat([x.float() for x in ra], dim=0)
+        B = torch.cat([x.float() for x in rb], dim=0)
+    except RuntimeError as e:
+        print(f"[{name}] concatenation failed: {e}")
+        return
+
+    if A.shape != B.shape:
+        print(f"[{name}] shape mismatch after concat: A {A.shape} vs B {B.shape} - skip")
+        return
+
+    # Flatten all non-token dimensions for per-token max diff
+    A_flat = A.view(A.size(0), -1)
+    B_flat = B.view(B.size(0), -1)
+    n = A_flat.size(0)
+
+    diff = (A_flat - B_flat).abs().float()
+    maxdiff = diff.max().item()
+    nbad = int((diff.max(dim=1)[0] > tol).sum().item())
+    print(f"[{name}] maxdiff={maxdiff:.6e}  tokens={n}  bad_positions={nbad}/{n}")
 
 
 def main():
@@ -83,121 +88,36 @@ def main():
     print(f"DP{dp_a}: {[fmt(d) for d in dirs_a]}")
     print(f"DP{dp_b}: {[fmt(d) for d in dirs_b]}")
 
-    # Concat per-rank token chunks (SP slices are contiguous in token order,
-    # so concat restores the full token order for both DPs).
-    def concat_compare(name, mark):
-        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
-        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
-        if not all(x is not None for x in ra + rb):
-            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
-                  f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
-            return
-        A = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in ra], dim=0)
-        B = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in rb], dim=0)
-        n = min(A.shape[0], B.shape[0])
-        diff = (A[:n] - B[:n]).abs().float()
-        maxdiff = diff.max().item()
-        nbad = int((diff.max(-1).values > 1e-3).sum().item())
-        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
-        print(f"[{name}] maxdiff={maxdiff:.6e}  tokens={n}  bad_positions={nbad}/{n}{mark_out}")
+    # Compare top-level probes
+    compare_probe("oproj_out", dirs_a, dirs_b, dp_a, dp_b, args.tol)
 
-    # Per-rank {ptr, shape} dict compare (not tensors).  Lets us see whether
-    # the layer input is the SAME buffer as model_pre_layer0 (same ptr) or a
-    # different aliased buffer (different ptr), within each rank.
-    def meta_compare(name, mark):
-        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
-        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
-        if not all(x is not None for x in ra + rb):
-            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
-                  f"DP{dp_b}={[x is not None for x in rb]}")
-            return
-        pa = [x.get("ptr") for x in ra]
-        pb = [x.get("ptr") for x in rb]
-        fa = [x.get("fwd") for x in ra]
-        fb = [x.get("fwd") for x in rb]
-        same_across_a = len(set(pa)) == 1
-        same_across_b = len(set(pb)) == 1
-        print(f"[{name}] DP{dp_a} ptrs={pa} fwd={fa} (all_same={same_across_a})")
-        print(f"[{name}] DP{dp_b} ptrs={pb} fwd={fb} (all_same={same_across_b})")
-        print(f"[{name}] shapes DP{dp_a}={[x.get('shape') for x in ra]} "
-              f"DP{dp_b}={[x.get('shape') for x in rb]}{mark}")
-
-    # attn_hidden_in is full tokens, no heads -> direct rank0 compare.
-    def direct_compare(name, mark):
-        fa = load(os.path.join(dirs_a[0], f"{name}.pt"))
-        fb = load(os.path.join(dirs_b[0], f"{name}.pt"))
-        if fa is None or fb is None:
-            print(f"[{name}] missing: DP{dp_a}={fa is not None} DP{dp_b}={fb is not None} (re-sync)")
-            return
-        n = min(fa.shape[0], fb.shape[0])
-        diff = (fa[:n].float() - fb[:n].float()).abs()
-        maxdiff = diff.max().item()
-        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
-        print(f"[{name}] maxdiff={maxdiff:.6e}  shape={tuple(fa.shape)} vs {tuple(fb.shape)}{mark_out}")
-
-    # Per-rank heads with full tokens -> head-overlay.
-    def overlay_compare(name, mark):
-        ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
-        rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
-        if not all(x is not None for x in ra + rb):
-            print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
-                  f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
-            return
-        try:
-            A = head_overlay(ra)
-            B = head_overlay(rb)
-        except AssertionError as e:
-            print(f"[{name}] head_overlay failed: {e}")
-            return
-        n = min(A.shape[0], B.shape[0])
-        diff = (A[:n] - B[:n]).abs().float()
-        maxdiff = diff.max().item()
-        nbad = int((diff.max(-1).values > 1e-3).sum().item())
-        mark_out = f"   <== {mark}" if maxdiff > args.tol else ""
-        print(f"[{name}] maxdiff={maxdiff:.6e}  heads={A.shape[1]}  tokens={n}  "
-              f"bad_positions={nbad}/{n}{mark_out}")
-
-    concat_compare("oproj_out", "O_PROJ OUTPUT (LAST LAYER) DIVERGES")
-
-    # Per-layer probes: discover layer indices from the first rank's dump dir.
-    probes_per_layer = [
-        ("hc_pre_y", "HC_PRE OUTPUT"),
-        ("attn_in", "ATTN_IN (LAYERNORM)"),
-        ("attn_out", "ATTN+HC_POST"),
-        ("mlp_in", "MLP_IN (FFN HC_PRE)"),
-        ("mlp_out", "MLP OUTPUT"),
-    ]
+    # Discover layer indices
     first_layer_files = sorted(glob.glob(os.path.join(dirs_a[0], "layer*_hc_pre_y.pt")))
-    if first_layer_files:
-        import re as _re
-        layer_indices = sorted(
-            int(_re.search(r"layer(\d+)_", os.path.basename(f)).group(1))
-            for f in first_layer_files
-        )
-        first_bad_layer = None
-        for idx in layer_indices:
-            layer_has_bad = False
-            for suffix, label in probes_per_layer:
-                name = f"layer{idx}_{suffix}"
-                ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
-                rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
-                if not all(x is not None for x in ra + rb):
-                    continue
-                A = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in ra], dim=0)
-                B = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in rb], dim=0)
-                n = min(A.shape[0], B.shape[0])
-                diff = (A[:n] - B[:n]).abs().float().max().item()
-                if diff > args.tol:
-                    layer_has_bad = True
-                    print(f"  >> first divergence: layer{idx} {label} maxdiff={diff:.6e}")
-            if layer_has_bad and first_bad_layer is None:
-                first_bad_layer = idx
-                print(f"== FIRST DIVERGING LAYER = layer{idx} ==")
-                break
-        if first_bad_layer is None:
-            print("== all layers bit-identical (probes) ==")
-    else:
-        print("no per-layer dumps found (check layer*_hc_pre_y.pt)")
+    if not first_layer_files:
+        print("No per‑layer dump files found.")
+        return
+
+    layer_indices = sorted(
+        int(re.search(r"layer(\d+)_", os.path.basename(f)).group(1))
+        for f in first_layer_files
+    )
+
+    probes = [
+        ("hc_pre_y", "HC_PRE"),
+        ("attn_in", "ATTN_IN"),
+        ("attn_out", "ATTN_OUT"),
+        ("mlp_in", "MLP_IN"),
+        ("mlp_router", "MLP_ROUTER"),
+        ("mlp_shared", "MLP_SHARED"),
+        ("mlp_routed", "MLP_ROUTED"),
+        ("mlp_combined", "MLP_COMBINED"),
+        ("mlp_out", "MLP_OUT"),
+    ]
+
+    for idx in layer_indices:
+        for suffix, label in probes:
+            name = f"layer{idx}_{suffix}"
+            compare_probe(name, dirs_a, dirs_b, dp_a, dp_b, args.tol)
 
 
 if __name__ == "__main__":
