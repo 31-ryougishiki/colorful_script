@@ -157,18 +157,47 @@ def main():
         print(f"[{name}] maxdiff={maxdiff:.6e}  heads={A.shape[1]}  tokens={n}  "
               f"bad_positions={nbad}/{n}{mark_out}")
 
-    concat_compare("oproj_out", "O_PROJ OUTPUT DIVERGES")
-    concat_compare("model_embed", "RAW EMBEDDING DIVERGES")
-    concat_compare("model_embed_hc", "EMBEDDING (REPEATED, LAYER INPUT) DIVERGES")
-    concat_compare("model_pre_layer0", "MODEL PRE-LAYER0 INPUT DIVERGES")
-    meta_compare("model_pre_layer0_meta", "MODEL PRE-LAYER0 PTR")
-    concat_compare("model_post_clone", "MODEL POST-CLONE INPUT DIVERGES")
-    meta_compare("model_post_clone_meta", "MODEL POST-CLONE PTR")
-    concat_compare("layer0_entry", "LAYER0 ENTRY INPUT (BEFORE CLONE) DIVERGES")
-    meta_compare("layer0_entry_meta", "LAYER0 ENTRY PTR")
-    concat_compare("layer0_input", "LAYER0 ENTRY INPUT (PRE-CLONE) DIVERGES")
-    meta_compare("layer0_input_meta", "LAYER0 INPUT PTR")
-    concat_compare("hc_residual", "HC_RESIDUAL (LAYER INPUT CLONE) DIVERGES")
+    concat_compare("oproj_out", "O_PROJ OUTPUT (LAST LAYER) DIVERGES")
+
+    # Per-layer probes: discover layer indices from the first rank's dump dir.
+    probes_per_layer = [
+        ("hc_pre_y", "HC_PRE OUTPUT"),
+        ("attn_in", "ATTN_IN (LAYERNORM)"),
+        ("attn_out", "ATTN+HC_POST"),
+        ("mlp_in", "MLP_IN (FFN HC_PRE)"),
+        ("mlp_out", "MLP OUTPUT"),
+    ]
+    first_layer_files = sorted(glob.glob(os.path.join(dirs_a[0], "layer*_hc_pre_y.pt")))
+    if first_layer_files:
+        import re as _re
+        layer_indices = sorted(
+            int(_re.search(r"layer(\d+)_", os.path.basename(f)).group(1))
+            for f in first_layer_files
+        )
+        first_bad_layer = None
+        for idx in layer_indices:
+            layer_has_bad = False
+            for suffix, label in probes_per_layer:
+                name = f"layer{idx}_{suffix}"
+                ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+                rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+                if not all(x is not None for x in ra + rb):
+                    continue
+                A = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in ra], dim=0)
+                B = torch.cat([x.float().reshape(-1, x.shape[-1]) for x in rb], dim=0)
+                n = min(A.shape[0], B.shape[0])
+                diff = (A[:n] - B[:n]).abs().float().max().item()
+                if diff > args.tol:
+                    layer_has_bad = True
+                    print(f"  >> first divergence: layer{idx} {label} maxdiff={diff:.6e}")
+            if layer_has_bad and first_bad_layer is None:
+                first_bad_layer = idx
+                print(f"== FIRST DIVERGING LAYER = layer{idx} ==")
+                break
+        if first_bad_layer is None:
+            print("== all layers bit-identical (probes) ==")
+    else:
+        print("no per-layer dumps found (check layer*_hc_pre_y.pt)")
 
 
 if __name__ == "__main__":
