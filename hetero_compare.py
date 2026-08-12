@@ -34,6 +34,25 @@ def fwd_dir(rank_dir):
     return best
 
 
+def compare_experts(name, dirs_a, dirs_b, dp_a, dp_b):
+    """Compare per-token SELECTED expert ids (integer tensor) between DP groups.
+    Reports the fraction of (token,k) slots where the two DPs chose DIFFERENT
+    experts — 0.0 means identical routing."""
+    ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
+    rb = [load(os.path.join(d, f"{name}.pt")) for d in dirs_b]
+    if not all(x is not None for x in ra + rb):
+        print(f"[{name}] missing: DP{dp_a}={[x is not None for x in ra]} "
+              f"DP{dp_b}={[x is not None for x in rb]} (re-sync)")
+        return None
+    A = torch.cat([x.long().reshape(-1) for x in ra], dim=0)
+    B = torch.cat([x.long().reshape(-1) for x in rb], dim=0)
+    n = min(A.shape[0], B.shape[0])
+    same = (A[:n] == B[:n]).float().mean().item()
+    mism = n - int((A[:n] == B[:n]).sum().item())
+    print(f"[{name}] expert-selection match={same*100:.2f}%  mismatched_slots={mism}/{n}")
+    return same
+
+
 def compare_probe(name, dirs_a, dirs_b, dp_a, dp_b, tol):
     """Compare a probe by concatenating all ranks along the token dimension."""
     ra = [load(os.path.join(d, f"{name}.pt")) for d in dirs_a]
@@ -120,6 +139,19 @@ def main():
         for suffix, label in probes:
             name = f"layer{idx}_{suffix}"
             compare_probe(name, dirs_a, dirs_b, dp_a, dp_b, args.tol)
+
+    # Compare per-token selected experts (moe{idx}_expert_ids, the ACTUAL
+    # routing computed in AscendUnquantizedFusedMoEMethod.apply).
+    moe_files = sorted(glob.glob(os.path.join(dirs_a[0], "moe*_expert_ids.pt")))
+    if moe_files:
+        moe_indices = sorted(
+            int(re.search(r"moe(\d+)_expert_ids", os.path.basename(f)).group(1))
+            for f in moe_files
+        )
+        for idx in moe_indices:
+            compare_experts(f"moe{idx}_expert_ids", dirs_a, dirs_b, dp_a, dp_b)
+    else:
+        print("no moe*_expert_ids dumps found")
 
 
 if __name__ == "__main__":
